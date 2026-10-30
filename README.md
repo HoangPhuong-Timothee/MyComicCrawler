@@ -62,8 +62,8 @@ Nhấp đúp vào file [`run.bat`](run.bat) hoặc mở PowerShell/CMD:
 ```
 
 ### 2. Thao tác trên giao diện dòng lệnh:
-1. **Nhập URL:** Dán link truyện (ví dụ: `https://www.nettruyenviety.shop/truyen-tranh/homunculus` hoặc `https://truyenqq.com.vn/...`).
-2. **Thư mục lưu:** Nhấn **Enter** để chọn thư mục mặc định `C:\Users\ROSA\workspace\comic`, hoặc nhập thư mục bạn muốn.
+1. **Nhập URL:** Dán link truyện (ví dụ: `https://.../truyen-tranh/homunculus` hoặc bất kỳ trang truyện nào).
+2. **Thư mục lưu:** Nhấn **Enter** để chọn thư mục mặc định `comic/` tự động nhận diện nằm cùng cấp với tool (không nằm trong source code), hoặc nhập đường dẫn tùy chỉnh (tương đối hoặc tuyệt đối).
 3. **Chọn chương tải:**
    - Nhấn **Enter** (hoặc gõ `all`): Tải tất cả các chương.
    - Gõ khoảng: `1-10` (tải từ chap 1 đến chap 10).
@@ -75,9 +75,9 @@ Nhấp đúp vào file [`run.bat`](run.bat) hoặc mở PowerShell/CMD:
 
 ## 📱 Hướng dẫn chép vào máy đọc sách Android
 
-Sau khi tải xong, trong thư mục chỉ chứa duy nhất các file `.cbz` nén sạch sẽ:
+Sau khi tải xong, trong thư mục đích chỉ chứa duy nhất các file `.cbz` nén sạch sẽ:
 ```text
-C:\Users\ROSA\workspace\comic\Homunculus\
+[Thư mục cha]/comic/[Tên Truyện]/
 ├── Chapter 001.cbz
 ├── Chapter 002.cbz
 └── Chapter 003.cbz

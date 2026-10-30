@@ -3,33 +3,57 @@ package utils
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 )
 
-const DefaultComicDir = `C:\Users\ROSA\workspace\comic`
-
 var illegalPathChars = regexp.MustCompile(`[\\/*?:"<>|]`)
 var whitespaceRegex = regexp.MustCompile(`[\r\n\t\s]+`)
 var chapterPrefixRegex = regexp.MustCompile(`(?i)^(Chương|Chapter|Chap)\s*\d+([\s:\-_]+)?`)
 
+// GetDefaultComicDir tự động xác định thư mục 'comic' cùng cấp với thư mục tool (không nằm trong source)
+func GetDefaultComicDir() string {
+	var toolDir string
+	if exePath, err := os.Executable(); err == nil {
+		toolDir = filepath.Dir(exePath)
+	} else {
+		toolDir, _ = os.Getwd()
+	}
+
+	parentDir := filepath.Dir(toolDir)
+	// Tránh trường hợp tool nằm ở thư mục gốc ổ đĩa (vd: C:\ hoặc D:\)
+	if parentDir == toolDir || parentDir == "" || parentDir == "." {
+		return filepath.Join(toolDir, "comic")
+	}
+
+	return filepath.Join(parentDir, "comic")
+}
+
 // ResolveOutputDir xác định đường dẫn thư mục lưu truyện
-// Nếu rỗng -> C:\Users\ROSA\workspace\comic
-// Nếu tương đối (vd: 20centuryboys) -> C:\Users\ROSA\workspace\comic\20centuryboys
+// Nếu rỗng -> Lấy thư mục 'comic' mặc định cùng cấp với tool
+// Nếu tương đối (vd: homunculus) -> [DefaultComicDir]\homunculus
 // Nếu tuyệt đối (vd: D:\Truyen) -> giữ nguyên
 func ResolveOutputDir(userInput string) string {
+	defaultDir := GetDefaultComicDir()
 	cleaned := strings.TrimSpace(userInput)
-	cleaned = strings.Trim(cleaned, `"'`)
+	cleaned = strings.Trim(cleaned, "\ufeff\u200b\u200c\u200d\u00a0\"'")
+	cleaned = strings.TrimSpace(cleaned)
 	if cleaned == "" {
-		return DefaultComicDir
+		_ = os.MkdirAll(defaultDir, 0755)
+		return defaultDir
 	}
 
 	if filepath.IsAbs(cleaned) {
-		return filepath.Clean(cleaned)
+		res := filepath.Clean(cleaned)
+		_ = os.MkdirAll(res, 0755)
+		return res
 	}
 
-	return filepath.Clean(filepath.Join(DefaultComicDir, cleaned))
+	res := filepath.Clean(filepath.Join(defaultDir, cleaned))
+	_ = os.MkdirAll(res, 0755)
+	return res
 }
 
 // CleanFilename làm sạch tên file/folder tương thích hệ điều hành Windows & Android

@@ -38,6 +38,8 @@ func main() {
 			break
 		}
 		rawURL := strings.TrimSpace(scanner.Text())
+		rawURL = strings.Trim(rawURL, "\ufeff\u200b\u200c\u200d\u00a0\"'")
+		rawURL = strings.TrimSpace(rawURL)
 		if rawURL == "" {
 			continue
 		}
@@ -46,8 +48,9 @@ func main() {
 			break
 		}
 
-		// Hỏi thư mục lưu truyện
-		fmt.Printf("📂 Thư mục lưu truyện [Nhấn Enter để chọn mặc định: %s]: ", utils.DefaultComicDir)
+		// Hỏi thư mục lưu truyện (Tự động nhận diện dynamic cùng cấp với tool)
+		defaultDir := utils.GetDefaultComicDir()
+		fmt.Printf("📂 Thư mục lưu truyện [Nhấn Enter để chọn mặc định: %s]: ", defaultDir)
 		scanner.Scan()
 		rawOutDir := strings.TrimSpace(scanner.Text())
 		outputDir := utils.ResolveOutputDir(rawOutDir)
@@ -76,6 +79,10 @@ func main() {
 		fmt.Print("\n👉 Chọn chương cần tải ('all' để tải hết, '1-10', '50,52', hoặc số chương) [Mặc định: all]: ")
 		scanner.Scan()
 		chapChoice := strings.TrimSpace(scanner.Text())
+		if strings.EqualFold(chapChoice, "exit") || strings.EqualFold(chapChoice, "quit") || strings.EqualFold(chapChoice, "q") {
+			fmt.Println("↩ Đã hủy tải bộ truyện này.")
+			continue
+		}
 		if chapChoice == "" {
 			chapChoice = "all"
 		}
@@ -124,9 +131,9 @@ func main() {
 
 func printBanner() {
 	fmt.Println("================================================================================")
-	fmt.Println("      🚀 COMIC CRAWLER ENGINE (GOLANG ULTRA-FAST & RECURRENT LOOP) 🚀")
-	fmt.Println("  Tải ảnh Goroutines -> Nén CBZ trong RAM -> Chuẩn máy đọc sách Android")
-	fmt.Println("  Chạy vòng lặp liên tục, cào xong hỏi tiếp URL truyện mới (gõ 'exit' để thoát)")
+	fmt.Println("      🚀 COMIC CRAWLER ENGINE (ULTRA-FAST) 🚀")
+	fmt.Println("  Tải ảnh -> Nén CBZ trong RAM -> Chuẩn máy đọc sách Android")
+	fmt.Println("              (gõ 'exit' để thoát)")
 	fmt.Println("================================================================================")
 	fmt.Println()
 }
@@ -216,4 +223,3 @@ func printSuccessSummary(title, finalFolder string) {
 	fmt.Println("     • Moon+ Reader / Perfect Viewer: Chép vào Books/ hoặc Comics/ rồi mở app đọc.")
 	fmt.Println("--------------------------------------------------------------------------------\n")
 }
-

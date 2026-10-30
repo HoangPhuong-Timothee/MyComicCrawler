@@ -1,7 +1,8 @@
 """
-Sidecar Solver - Module phụ trợ độc lập (Microservice / CLI helper)
-Nhiệm vụ duy nhất: Giải quyết các trang có Cloudflare Turnstile/JS challenge phức tạp
-và trả HTML sạch về cho Golang tiếp tục xử lý tốc độ cao.
+Sidecar Solver - Generic Microservice / CLI Helper
+Nhiệm vụ duy nhất: Giải quyết các trang có Cloudflare WAF / Turnstile / JS Challenge
+bằng TLS Impersonation (BoringSSL Chrome 120), trả HTML sạch về cho Golang tiếp tục xử lý tốc độ cao.
+Hoàn toàn độc lập, không hardcode bất kỳ domain hay URL cụ thể nào (Chuẩn SOLID - SRP).
 """
 import sys
 
@@ -19,23 +20,17 @@ def solve(url: str):
             "Sec-Fetch-Site": "none",
             "Upgrade-Insecure-Requests": "1",
         }
+        # Thử với Chrome 120 impersonation
         resp = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
         if resp.status_code == 200 and "Just a moment..." not in resp.text:
             print(resp.text)
             sys.exit(0)
 
-        # Nếu domain gốc bị chặn WAF 403, tự động thử mirror sạch
-        if "nettruyen" in url:
-            for mirror in ["nettruyen.gg", "nettruyenbb.com"]:
-                import re
-                u = re.sub(r'https?://[^/]+', f'https://{mirror}', url)
-                try:
-                    r2 = requests.get(u, headers=headers, impersonate="chrome120", timeout=10)
-                    if r2.status_code == 200 and "Just a moment..." not in r2.text:
-                        print(r2.text)
-                        sys.exit(0)
-                except Exception:
-                    pass
+        # Fallback thử với Chrome 124 nếu Chrome 120 chưa qua được
+        resp2 = requests.get(url, headers=headers, impersonate="chrome124", timeout=15)
+        if resp2.status_code == 200 and "Just a moment..." not in resp2.text:
+            print(resp2.text)
+            sys.exit(0)
 
     except Exception as e:
         sys.stderr.write(f"Solver error: {e}\n")

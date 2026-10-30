@@ -66,44 +66,50 @@ func IsCloudflareChallenge(statusCode int, body string) bool {
 	return false
 }
 
-// GetCandidateMirrors trả về các mirror thay thế cho các mạng web truyện lớn
-func GetCandidateMirrors(originalURL string) []string {
+// MirrorRegistry quản lý các cụm mirror thay thế theo Strategy Pattern (OCP)
+type MirrorRegistry struct {
+	clusters map[string][]string
+}
+
+var DefaultMirrorRegistry = NewMirrorRegistry()
+
+func NewMirrorRegistry() *MirrorRegistry {
+	r := &MirrorRegistry{
+		clusters: make(map[string][]string),
+	}
+	// Đăng ký các cụm mạng web truyện lớn (Dễ dàng mở rộng OCP không cần sửa fetcher)
+	r.Register("nettruyen", []string{"nettruyen.gg", "nettruyenbb.com", "nettruyenco.vn", "nettruyena.com"})
+	r.Register("truyenqq", []string{"truyenqqviet.com", "truyenqq.com.co", "truyenqqto.com"})
+	return r
+}
+
+func (r *MirrorRegistry) Register(clusterKey string, mirrors []string) {
+	r.clusters[strings.ToLower(clusterKey)] = mirrors
+}
+
+// GetCandidateMirrors trả về các mirror thay thế cho URL
+func (r *MirrorRegistry) GetCandidateMirrors(originalURL string) []string {
 	u, err := url.Parse(originalURL)
 	if err != nil {
 		return nil
 	}
 
 	host := strings.ToLower(u.Host)
+	var res []string
 
-	// Cụm NetTruyen
-	if strings.Contains(host, "nettruyen") {
-		mirrors := []string{"nettruyen.gg", "nettruyenbb.com", "nettruyenco.vn", "nettruyena.com"}
-		var res []string
-		for _, m := range mirrors {
-			if !strings.Contains(host, m) {
-				newU := *u
-				newU.Host = m
-				res = append(res, newU.String())
+	for key, mirrors := range r.clusters {
+		if strings.Contains(host, key) {
+			for _, m := range mirrors {
+				if !strings.Contains(host, m) {
+					newU := *u
+					newU.Host = m
+					res = append(res, newU.String())
+				}
 			}
+			break
 		}
-		return res
 	}
-
-	// Cụm TruyenQQ
-	if strings.Contains(host, "truyenqq") {
-		mirrors := []string{"truyenqqviet.com", "truyenqq.com.co", "truyenqqto.com"}
-		var res []string
-		for _, m := range mirrors {
-			if !strings.Contains(host, m) {
-				newU := *u
-				newU.Host = m
-				res = append(res, newU.String())
-			}
-		}
-		return res
-	}
-
-	return nil
+	return res
 }
 
 func (f *Fetcher) Client() tls_client.HttpClient {
@@ -151,44 +157,51 @@ func (f *Fetcher) FetchHTML(targetURL string, referer ...string) (string, string
 		if statusCode == 200 && !IsCloudflareChallenge(statusCode, bodyText) {
 			return targetURL, bodyText, nil
 		}
+		// Nếu là mã lỗi client thông thường (404 Not Found, 400 Bad Request, v.v.), không phải do Cloudflare chặn bot (403/503), dừng ngay
+		if statusCode == 404 || statusCode == 400 || statusCode == 410 || (statusCode >= 500 && !IsCloudflareChallenge(statusCode, bodyText)) {
+			return "", "", fmt.Errorf("HTTP %d error: %s", statusCode, targetURL)
+		}
 	}
 
-	// Nếu gặp Cloudflare Challenge, 403/503 hoặc timeout:
-	// Bước 1: Thử gọi Sidecar Solver Python (solver.py) nếu có -> Nhanh nhất (1-2s) & chuẩn xác 100%
+	// Nếu gặp Cloudflare Challenge, 403/503 hoặc timeout kết nối:
 	if IsCloudflareChallenge(statusCode, bodyText) || err != nil {
+		// Bước 1: Thử gọi Sidecar Solver Python (solver.py) nếu có -> Nhanh nhất (1-2s) & chuẩn xác 100%
 		solvedBody, sErr := SolveWithPythonSidecar("solver.py", targetURL)
 		if sErr == nil && len(solvedBody) > 0 && !IsCloudflareChallenge(200, solvedBody) {
 			return targetURL, solvedBody, nil
 		}
-	}
 
-	// Bước 2: Thử gọi FlareSolverr (nếu service đang chạy ở port 8191)
-	if IsCloudflareChallenge(statusCode, bodyText) || err != nil {
-		solvedBody, sErr := SolveWithFlareSolverr(targetURL)
+		// Bước 2: Thử gọi FlareSolverr (nếu service đang chạy ở port 8191)
+		solvedBody, sErr = SolveWithFlareSolverr(targetURL)
 		if sErr == nil && len(solvedBody) > 0 && !IsCloudflareChallenge(200, solvedBody) {
 			return targetURL, solvedBody, nil
 		}
-	}
 
-	// Bước 3: Thử các Mirror domain tương đương
-	mirrors := GetCandidateMirrors(targetURL)
-	for _, mirrorURL := range mirrors {
-		mReq, err := http.NewRequest("GET", mirrorURL, nil)
-		if err != nil {
-			continue
-		}
-		mReq.Header = req.Header.Clone()
-		mU, _ := url.Parse(mirrorURL)
-		if mU != nil {
-			mReq.Header.Set("Referer", fmt.Sprintf("%s://%s/", mU.Scheme, mU.Host))
-		}
-		mResp, err := f.client.Do(mReq)
-		if err == nil {
-			mBody, _ := io.ReadAll(mResp.Body)
-			mResp.Body.Close()
-			mText := string(mBody)
-			if mResp.StatusCode == 200 && !IsCloudflareChallenge(mResp.StatusCode, mText) {
-				return mirrorURL, mText, nil
+		// Bước 3: Thử các Mirror domain tương đương (nếu thuộc cụm có đăng ký mirror)
+		mirrors := DefaultMirrorRegistry.GetCandidateMirrors(targetURL)
+		for _, mirrorURL := range mirrors {
+			mReq, mErr := http.NewRequest("GET", mirrorURL, nil)
+			if mErr == nil {
+				mReq.Header = req.Header.Clone()
+				mU, _ := url.Parse(mirrorURL)
+				if mU != nil {
+					mReq.Header.Set("Referer", fmt.Sprintf("%s://%s/", mU.Scheme, mU.Host))
+				}
+				mResp, doErr := f.client.Do(mReq)
+				if doErr == nil {
+					mBody, _ := io.ReadAll(mResp.Body)
+					mResp.Body.Close()
+					mText := string(mBody)
+					if mResp.StatusCode == 200 && !IsCloudflareChallenge(mResp.StatusCode, mText) {
+						return mirrorURL, mText, nil
+					}
+				}
+			}
+
+			// Nếu mirror cũng bị challenge hoặc handshake timeout, thử giải qua Sidecar
+			solvedBody, sErr := SolveWithPythonSidecar("solver.py", mirrorURL)
+			if sErr == nil && len(solvedBody) > 0 && !IsCloudflareChallenge(200, solvedBody) {
+				return mirrorURL, solvedBody, nil
 			}
 		}
 	}

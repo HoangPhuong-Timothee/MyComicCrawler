@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"comic-crawler/pkg/models"
 	"comic-crawler/pkg/network"
@@ -99,16 +100,27 @@ func (e *Extractor) ExtractManga(targetURL string) (*models.Manga, error) {
 		coverURL = resolveURL(baseURL, ogImg)
 	}
 
-	// 3. Trích xuất Chapters (Thử qua Dynamic API trước)
+	// 3. Trích xuất Chapters theo Strategy Pipeline (Chuẩn SOLID - OCP)
 	slug := extractSlug(u.Path)
-	chapters := tryDynamicComicService(baseURL, finalURL, slug)
 
-	// 4. Nếu không có API, quét DOM
-	if len(chapters) == 0 {
-		chapters = scanDOMChapters(doc, baseURL, finalURL)
+	// Strategy A: Quét Generic DOM Selector trước (Siêu nhanh 1ms trong RAM cho 90% trang)
+	chapters := scanDOMChapters(doc, baseURL, finalURL)
+
+	// Strategy B: Nếu DOM chưa có chapter hoặc web dùng Ajax phân trang ẩn (như NetTruyen), thử Dynamic API
+	hasMoreHidden := doc.Find("#nt_listchapter, .hidden_chapters, .show-more, a#show-more, .btn-show-more, a[onclick*='ChapterList']").Length() > 0
+	if len(chapters) == 0 || (len(chapters) <= 25 && hasMoreHidden) {
+		apiChapters := tryDynamicAPIs(baseURL, finalURL, slug)
+		if len(apiChapters) > len(chapters) {
+			chapters = apiChapters
+		}
 	}
 
-	// 5. Nếu không tìm thấy chapter nào, kiểm tra xem có phải URL của 1 chương đọc lẻ không
+	// Strategy C: Bóc tách Script State (Next.js / Nuxt SPA)
+	if len(chapters) == 0 {
+		chapters = tryExtractScriptState(doc, baseURL, slug)
+	}
+
+	// Strategy D: Fallback URL đơn lẻ là trang đọc của 1 chương
 	if len(chapters) == 0 {
 		imgs := extractImagesFromDoc(doc, finalURL)
 		if len(imgs) > 0 {
@@ -120,7 +132,7 @@ func (e *Extractor) ExtractManga(targetURL string) (*models.Manga, error) {
 				num = 1.0
 			}
 			chapters = append(chapters, models.Chapter{
-				ID:     "chap_1",
+				ID:     finalURL,
 				Title:  title,
 				URL:    finalURL,
 				Number: num,
@@ -142,9 +154,18 @@ func (e *Extractor) ExtractManga(targetURL string) (*models.Manga, error) {
 	}, nil
 }
 
-// ExtractChapterImages bóc tách danh sách link ảnh của 1 chương
+// ExtractChapterImages bóc tách danh sách link ảnh của 1 chương (kèm retry)
 func (e *Extractor) ExtractChapterImages(chapterURL string) ([]string, error) {
-	finalURL, html, err := e.fetcher.FetchHTML(chapterURL, chapterURL)
+	var finalURL, html string
+	var err error
+
+	for attempt := 0; attempt < 3; attempt++ {
+		finalURL, html, err = e.fetcher.FetchHTML(chapterURL, chapterURL)
+		if err == nil && len(html) > 0 {
+			break
+		}
+		time.Sleep(time.Duration(attempt+1) * 800 * time.Millisecond)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -165,9 +186,12 @@ func (e *Extractor) ExtractChapterImages(chapterURL string) ([]string, error) {
 
 func extractSlug(path string) string {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
+	prefixes := []string{"truyen-tranh", "manga", "series", "comic", "truyen", "read"}
 	for i, p := range parts {
-		if p == "truyen-tranh" && i+1 < len(parts) {
-			return parts[i+1]
+		for _, prefix := range prefixes {
+			if strings.EqualFold(p, prefix) && i+1 < len(parts) {
+				return parts[i+1]
+			}
 		}
 	}
 	if len(parts) > 0 {
@@ -176,46 +200,159 @@ func extractSlug(path string) string {
 	return ""
 }
 
-func tryDynamicComicService(baseURL, referer, slug string) []models.Chapter {
+// tryDynamicAPIs thử khám phá danh sách chương qua các mẫu endpoint AJAX/API phổ biến
+func tryDynamicAPIs(baseURL, referer, slug string) []models.Chapter {
 	if slug == "" {
 		return nil
 	}
-	apiURL := fmt.Sprintf("%s/Comic/Services/ComicService.asmx/ChapterList?slug=%s", baseURL, url.QueryEscape(slug))
-	_, html, err := network.DefaultFetcher.FetchHTML(apiURL, referer)
-	if err != nil {
-		return nil
+
+	apiPatterns := []string{
+		"%s/Comic/Services/ComicService.asmx/ChapterList?slug=%s",
+		"%s/ajax/manga/%s/chapters",
+		"%s/api/manga/%s/chapters",
+		"%s/api/chapters?slug=%s",
 	}
 
-	type apiItem struct {
-		ChapterNum  float64 `json:"chapter_num"`
-		ChapterName string  `json:"chapter_name"`
-		ChapterSlug string  `json:"chapter_slug"`
-	}
-	type apiResp struct {
-		Data []apiItem `json:"data"`
-	}
-
-	var apiResult apiResp
-	if err := json.Unmarshal([]byte(html), &apiResult); err == nil && len(apiResult.Data) > 0 {
-		var chapters []models.Chapter
-		for _, it := range apiResult.Data {
-			cSlug := it.ChapterSlug
-			if cSlug == "" {
-				cSlug = fmt.Sprintf("chuong-%g", it.ChapterNum)
-			}
-			chURL := fmt.Sprintf("%s/truyen-tranh/%s/%s", baseURL, slug, cSlug)
-			name := it.ChapterName
-			if name == "" {
-				name = fmt.Sprintf("Chapter %g", it.ChapterNum)
-			}
-			chapters = append(chapters, models.Chapter{
-				ID:     chURL,
-				Title:  name,
-				URL:    chURL,
-				Number: it.ChapterNum,
-			})
+	for _, pattern := range apiPatterns {
+		var apiURL string
+		if strings.Count(pattern, "%s") == 2 {
+			apiURL = fmt.Sprintf(pattern, baseURL, url.QueryEscape(slug))
+		} else {
+			apiURL = fmt.Sprintf(pattern, baseURL, slug)
 		}
-		return chapters
+
+		_, html, err := network.DefaultFetcher.FetchHTML(apiURL, referer)
+		if err != nil || len(html) == 0 {
+			continue
+		}
+
+		type apiItem struct {
+			ChapterNum  float64 `json:"chapter_num"`
+			ChapterName string  `json:"chapter_name"`
+			ChapterSlug string  `json:"chapter_slug"`
+			Number      float64 `json:"number"`
+			Name        string  `json:"name"`
+			URL         string  `json:"url"`
+		}
+		type apiResp struct {
+			Data     []apiItem `json:"data"`
+			Chapters []apiItem `json:"chapters"`
+		}
+
+		var apiResult apiResp
+		if err := json.Unmarshal([]byte(html), &apiResult); err == nil {
+			items := apiResult.Data
+			if len(items) == 0 {
+				items = apiResult.Chapters
+			}
+			if len(items) > 0 {
+				var chapters []models.Chapter
+				for _, it := range items {
+					num := it.ChapterNum
+					if num == 0 {
+						num = it.Number
+					}
+					name := it.ChapterName
+					if name == "" {
+						name = it.Name
+					}
+					if name == "" {
+						name = fmt.Sprintf("Chapter %g", num)
+					}
+
+					chURL := it.URL
+					if chURL == "" {
+						cSlug := it.ChapterSlug
+						if cSlug == "" {
+							cSlug = fmt.Sprintf("chuong-%g", num)
+						}
+						chURL = fmt.Sprintf("%s/truyen-tranh/%s/%s", baseURL, slug, cSlug)
+					} else {
+						chURL = resolveURL(baseURL, chURL)
+					}
+
+					chapters = append(chapters, models.Chapter{
+						ID:     chURL,
+						Title:  name,
+						URL:    chURL,
+						Number: num,
+					})
+				}
+				return chapters
+			}
+		}
+	}
+	return nil
+}
+
+// tryExtractScriptState bóc tách state JSON nhúng trong <script> (Next.js __NEXT_DATA__, Nuxt, SPA state)
+func tryExtractScriptState(doc *goquery.Document, baseURL, slug string) []models.Chapter {
+	var chapters []models.Chapter
+
+	doc.Find("script#__NEXT_DATA__").Each(func(i int, s *goquery.Selection) {
+		jsonText := strings.TrimSpace(s.Text())
+		if jsonText == "" {
+			return
+		}
+		var root map[string]interface{}
+		if err := json.Unmarshal([]byte(jsonText), &root); err == nil {
+			if chaps := searchChaptersRecursive(root, baseURL, slug); len(chaps) > 0 {
+				chapters = chaps
+			}
+		}
+	})
+
+	return chapters
+}
+
+func searchChaptersRecursive(data interface{}, baseURL, slug string) []models.Chapter {
+	switch val := data.(type) {
+	case map[string]interface{}:
+		for k, v := range val {
+			if strings.Contains(strings.ToLower(k), "chapter") {
+				if list, ok := v.([]interface{}); ok && len(list) > 0 {
+					var res []models.Chapter
+					for _, item := range list {
+						if m, ok := item.(map[string]interface{}); ok {
+							num := 0.0
+							if n, ok := m["chapter_num"].(float64); ok {
+								num = n
+							} else if n, ok := m["number"].(float64); ok {
+								num = n
+							}
+							title := fmt.Sprintf("Chapter %g", num)
+							if t, ok := m["chapter_name"].(string); ok && t != "" {
+								title = t
+							}
+							u := ""
+							if link, ok := m["url"].(string); ok {
+								u = resolveURL(baseURL, link)
+							} else {
+								u = fmt.Sprintf("%s/manga/%s/chapter-%g", baseURL, slug, num)
+							}
+							res = append(res, models.Chapter{
+								ID:     u,
+								Title:  title,
+								URL:    u,
+								Number: num,
+							})
+						}
+					}
+					if len(res) > 0 {
+						return res
+					}
+				}
+			}
+			if chaps := searchChaptersRecursive(v, baseURL, slug); len(chaps) > 0 {
+				return chaps
+			}
+		}
+	case []interface{}:
+		for _, v := range val {
+			if chaps := searchChaptersRecursive(v, baseURL, slug); len(chaps) > 0 {
+				return chaps
+			}
+		}
 	}
 	return nil
 }
@@ -226,7 +363,8 @@ func scanDOMChapters(doc *goquery.Document, baseURL, currentURL string) []models
 
 	selector := ".works-chapter-list a, .list-chapter a, .chapter-list a, #chapterlist a, " +
 		".chapters a, .listing-chapters_wrap a, .wp-manga-chapter a, #list-chapter a, " +
-		".box-list-chapter a, ul.list-chapters a, #examples a, .list-wrap a, #nt_listchapter a, #chapter_list a"
+		".box-list-chapter a, ul.list-chapters a, #examples a, .list-wrap a, #nt_listchapter a, #chapter_list a, " +
+		".reading-list a, .list-chapters a, .item-name a, .chapter-item a, div.item a"
 
 	sel := doc.Find(selector)
 	if sel.Length() == 0 {
